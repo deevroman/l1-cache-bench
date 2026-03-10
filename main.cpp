@@ -10,7 +10,7 @@
 
 using namespace std;
 
-constexpr size_t INITIAL_CACHE_LINE = 64;
+constexpr size_t INITIAL_CACHE_LINE = 16;
 constexpr size_t MAX_MEMORY = 512 * 1024;
 constexpr size_t ITERATIONS = 1024 * 1024 * 32;
 
@@ -19,7 +19,7 @@ class ScopedBuffer
 public:
     explicit ScopedBuffer(size_t size) : size_(size)
     {
-        if (posix_memalign(reinterpret_cast<void**>(&data_), INITIAL_CACHE_LINE, size_))
+        if (posix_memalign(reinterpret_cast<void**>(&data_), max(INITIAL_CACHE_LINE, 64ul), size_))
         {
             cerr << "alloc failed\n";
             exit(1);
@@ -363,26 +363,12 @@ size_t run_associativity_benchmark(size_t l1_size)
     return 0;
 }
 
-
-void build_linear_stride_chain(uint8_t* buffer, size_t stride, size_t spots)
+size_t run_cache_line_benchmark_once()
 {
-    for (size_t i = 0; i < spots; ++i)
-    {
-        const auto slot = reinterpret_cast<uint8_t**>(buffer + i * stride);
-        const size_t next = (i + 1) % spots;
-        *slot = buffer + next * stride;
-    }
-}
-
-// Определение длины линеек
-// Строим цепочки с шагом в потенциальный размер линейки
-// и ищем скачок при переборе размера шага
-size_t run_cache_line_benchmark()
-{
-    constexpr size_t MIN_LINE = sizeof(uint8_t*) * 2;
+    constexpr size_t MIN_LINE = 8;
     constexpr size_t MAX_LINE = 256;
 
-    ScopedBuffer buffer(8 * 1024 * 1024);
+    ScopedBuffer buffer(64 * 1024 * 1024);
 
     struct LineSample
     {
@@ -392,40 +378,62 @@ size_t run_cache_line_benchmark()
 
     vector<LineSample> samples;
 
-    cout << "\nline-size \tns\n";
+    cout << "\nline-size \tns\t\tx-prev\n";
 
     for (size_t line_size = MIN_LINE; line_size <= MAX_LINE; line_size *= 2)
     {
-        const size_t spots = buffer.size() / line_size;
-        if (spots < 2)
+        const auto spots = buffer.size() / sizeof(uint32_t) / (MAX_LINE / line_size);
+        vector<uint64_t> times;
+        times.reserve(5);
+        for (int i = 0; i < 5; ++i)
         {
-            continue;
+            uint32_t acc = 0;
+            uint32_t* p = reinterpret_cast<uint32_t*>(buffer.data());
+            for (size_t i = 0; i < spots; i += line_size / sizeof(uint32_t))
+            {
+                acc ^= p[i] + 42;
+                p[i] = acc;
+            }
+            if (acc == 0x6767)
+            {
+                cout << "";
+            }
+
+            const auto start = chrono::steady_clock::now();
+            for (size_t i = 0; i < spots; i += line_size / sizeof(uint32_t))
+            {
+                acc ^= p[i] + 42;
+                p[i] = acc;
+            }
+            const auto end = chrono::steady_clock::now();
+            const uint64_t ns = chrono::duration_cast<chrono::nanoseconds>(end - start).count();
+            if (acc == 0x6767)
+            {
+                cout << "";
+            }
+
+            times.push_back(ns);
         }
+        const double ns = median_value(times);
 
-        build_linear_stride_chain(buffer.data(), line_size, spots);
-        verify_chain(buffer.data(), line_size, spots);
-
-        const double latency = measure_latency(buffer.data(), ITERATIONS * 2, 11);
-        samples.push_back(LineSample{line_size, latency});
+        samples.push_back(LineSample{line_size, ns});
 
         cout << setw(8) << line_size << "\t"
             << fixed << setprecision(4)
-            << latency << " ns\n";
-    }
-
-    for (size_t i = 1; i + 1 < samples.size(); ++i)
-    {
-        const double a = samples[i].latency_ns / samples[i - 1].latency_ns;
-        const double b = samples[i + 1].latency_ns / samples[i].latency_ns;
-        if (a >= 1.45 && b >= 1.05)
+            << static_cast<long long>(ns) << " ns\t";
+        if (samples.size() == 1)
         {
-            return samples[i].line_size;
+            cout << "-\n";
+        }
+        else
+        {
+            cout << "x" << fixed << setprecision(3) << ns / samples[samples.size() - 2].latency_ns << "\n";
         }
     }
 
-    size_t best_i = 2;
+    size_t best_i = 1;
     double best_ratio = 0.0;
-    for (size_t i = 2; i + 1 < samples.size(); ++i)
+    for (size_t i = 1; i < samples.size(); ++i)
     {
         const double ratio = samples[i].latency_ns / samples[i - 1].latency_ns;
         if (ratio > best_ratio)
@@ -434,13 +442,38 @@ size_t run_cache_line_benchmark()
             best_i = i;
         }
     }
-    return samples[best_i - 1].line_size;
+    return samples[best_i].line_size;
+}
+
+// Определение длины линеек
+// Прыгаем по буферу с шагом в потенциальный размер линейки
+// и ищем скачок при переборе размера шага
+size_t run_cache_line_benchmark()
+{
+    map<size_t, size_t> freq;
+
+    for (size_t run = 0; run < 13; ++run)
+    {
+        cout << "\n=== cache line run #" << run << " ===";
+        auto res = run_cache_line_benchmark_once();
+        ++freq[res];
+        cout << res << "\n";
+    }
+
+    return max_element(freq.begin(), freq.end(),
+                       [](const auto& a, const auto& b)
+                       {
+                           if (a.second == b.second)
+                           {
+                               return a.first > b.first;
+                           }
+                           return a.second < b.second;
+                       })->first;
 }
 
 int main()
 {
     const size_t l1_size = run_cache_size_benchmark();
-
     if (l1_size == 0)
     {
         cout << "\nFailed to determine L1 cache size reliably.\n";

@@ -23,3 +23,12 @@ L1 size: 32 KB
 L1 associativity: 8
 L1 cache line size: 64
 ```
+
+Личный VPS (вроде как под капотом Intel Xeon E5-2650 v3 @ 2.30GHz)
+
+```
+Result:
+L1 size: 32 KB
+L1 associativity: 8
+L1 cache line size: 64 B
+```
