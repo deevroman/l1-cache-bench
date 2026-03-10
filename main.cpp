@@ -6,6 +6,7 @@
 #include <map>
 #include <optional>
 #include <random>
+#include <unistd.h>
 #include <vector>
 
 using namespace std;
@@ -19,7 +20,7 @@ class ScopedBuffer
 public:
     explicit ScopedBuffer(size_t size) : size_(size)
     {
-        if (posix_memalign(reinterpret_cast<void**>(&data_), max(INITIAL_CACHE_LINE, 64ul), size_))
+        if (posix_memalign(reinterpret_cast<void**>(&data_), sysconf(_SC_PAGESIZE), size_))
         {
             cerr << "alloc failed\n";
             exit(1);
@@ -440,6 +441,14 @@ size_t run_cache_line_benchmark_once()
         {
             best_ratio = ratio;
             best_i = i;
+        }
+    }
+    if (best_i > 1)
+    {
+        // поиск плато
+        if (samples[best_i - 1].latency_ns / samples[best_i - 2].latency_ns + 0.3 > best_ratio)
+        {
+            return samples[best_i - 1].line_size;
         }
     }
     return samples[best_i].line_size;
